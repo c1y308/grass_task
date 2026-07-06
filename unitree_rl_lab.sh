@@ -38,12 +38,34 @@ _ut_setup_conda_env() {
         'export ISAACLAB_PATH='${ISAACLAB_PATH}'' \
         'alias isaaclab='${ISAACLAB_PATH}'/isaaclab.sh' \
         '' \
+        '# keep conda from importing Python 3.11 Isaac Sim packages with base Python' \
+        'if [ "$(type -t __conda_exe)" = "function" ] && [ -z "${_UNITREE_CONDA_EXE_WRAPPED+x}" ]; then' \
+        '    eval "$(declare -f __conda_exe | sed '\''1s/^__conda_exe/__unitree_original_conda_exe/'\'')"' \
+        '    __conda_exe() (' \
+        '        unset PYTHONPATH' \
+        '        __unitree_original_conda_exe "$@"' \
+        '    )' \
+        '    export _UNITREE_CONDA_EXE_WRAPPED=1' \
+        'fi' \
+        '' \
         '# show icon if not running headless' \
         'export RESOURCE_NAME="IsaacSim"' \
         '' \
         '# for unitree_rl_lab' \
         'source '${UNITREE_RL_LAB_PATH}'/unitree_rl_lab.sh' \
         '' > ${CONDA_PREFIX}/etc/conda/activate.d/setenv.sh
+
+    # restore the user's conda plugin setting when leaving this environment
+    mkdir -p ${CONDA_PREFIX}/etc/conda/deactivate.d
+    printf '%s\n' '#!/usr/bin/env bash' '' \
+        '# for unitree_rl_lab' \
+        'if [ -n "${_UNITREE_CONDA_EXE_WRAPPED+x}" ] && [ "$(type -t __unitree_original_conda_exe)" = "function" ]; then' \
+        '    unset -f __conda_exe' \
+        '    eval "$(declare -f __unitree_original_conda_exe | sed '\''1s/^__unitree_original_conda_exe/__conda_exe/'\'')"' \
+        '    unset -f __unitree_original_conda_exe' \
+        '    unset _UNITREE_CONDA_EXE_WRAPPED' \
+        'fi' \
+        '' > ${CONDA_PREFIX}/etc/conda/deactivate.d/unset_unitree_rl_lab.sh
 
     # check if we have _isaac_sim directory -> if so that means binaries were installed.
     # we need to setup conda variables to load the binaries
