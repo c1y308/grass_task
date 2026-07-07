@@ -8,7 +8,7 @@ from typing import Any
 Range = tuple[float, float]
 
 
-@dataclass(frozen=True)
+@dataclass
 class GrassTerrainStage:
     """Single grass terrain curriculum stage."""
 
@@ -54,7 +54,7 @@ class GrassTerrainStage:
         }
 
 
-@dataclass(frozen=True)
+@dataclass
 class GrassTerrainSchedule:
     """Fixed five-stage grass terrain schedule for research experiments."""
 
