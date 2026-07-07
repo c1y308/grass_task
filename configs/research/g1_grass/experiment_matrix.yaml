@@ -1,0 +1,17 @@
+experiment_name: g1_grass_risk_curriculum
+seeds: [1, 2, 3]
+# null keeps the repository task default max_iterations.
+# Override at launch time with train_matrix.py --train-steps.
+train_steps: null
+methods:
+  - name: B0_flat_rigid
+    task: Unitree-G1-29dof-Grass-FlatRigid
+  - name: B1_coupled_random
+    task: Unitree-G1-29dof-Grass-CoupledRandom
+  - name: B2_fixed_schedule
+    task: Unitree-G1-29dof-Grass-FixedSchedule
+  - name: B3_success_gate
+    task: Unitree-G1-29dof-Grass-SuccessGate
+  - name: Ours_risk_gate
+    task: Unitree-G1-29dof-Grass-RiskGate
+output_root: logs/research/g1_grass
