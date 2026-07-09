@@ -27,8 +27,10 @@
 | `mean_tracking_error` | 指令 base velocity `[vx, vy, yaw_rate]` 与实测 base velocity 的范数误差均值。 | 混合速度范数 |
 | `touchdown_timing_error_mean` | 基于 gait clock 的期望 stance timing 与 ankle-roll 足端实测接触时间的平均绝对误差。 | s |
 | `foot_slip_ratio` | stance contact 样本中，ankle-roll 足端水平速度超过 `0.20 m/s` 的比例。 | 比例 |
+| `missed_delayed_support_ratio` | 在 `expected_contact_mask` 内，足端 z 向接触力低于阈值的样本数除以期望支撑样本数；空期望支撑窗口记为 `0`，缺少接触力诊断时记为 `nan`。 | 比例 |
 | `stance_duration_deviation_mean` | 期望 stance elapsed time 与实测接触持续时间之间的平均绝对偏差。 | s |
 | `unexpected_contact_count` | 期望 swing phase 中检测到 ankle-roll 足端接触的样本数。 | 计数 |
+| `contact_window_iou` | 期望接触窗口与真实接触窗口的 IoU，真实接触优先由 `contact_force_z > force_threshold` 得到，若无力数据则使用已有 contact flag；union 为 `0` 时记为 `1`，缺少接触观测时记为 `nan`。 | 比例 |
 | `roll_rms` | base/root roll 的 RMS。 | rad |
 | `pitch_rms` | base/root pitch 的 RMS。 | rad |
 | `base_ang_vel_rms` | base/root 角速度模长的 RMS。 | rad/s |
@@ -42,6 +44,12 @@
 | `joint_limit_margin_min` | 到最近 joint position limit 的最小归一化距离；`0` 表示贴近限位，越大越安全。若无 joint limit tensor，则写 `nan`。 | 比例 |
 | `action_jerk` | policy action 二阶有限差分的 L2 范数均值。 | action unit/step^2 |
 | `compensation_phase_alignment` | 期望 stance 与实测接触重叠窗口内消耗的关节机械能，占总关节机械能的比例。 | 比例 |
-| `compensation_efficiency` | 派生 tracking/posture/slip risk proxy 的正向下降量除以关节机械能。 | risk/J |
+| `compensation_efficiency` | 事件触发固定窗口诊断量：在 `foot_slip`、`unexpected_contact`、`missed_support` 等事件周围，`(pre_window_risk - post_window_risk)` 的接触风险和姿态风险下降量之和除以事件后窗口关节能量。仅完整事件窗口完成时写数值；无完整窗口或缺少诊断时写 `nan`，不得用整回合平均 proxy 冒充。 | risk/J |
 
-`nan` 表示该指标无法从当前 Isaac Lab 或 articulation 暴露的字段中可靠计算。常见情况是机器人对象没有 torque limit 或 joint limit tensor。
+`missed_delayed_support_ratio` 使用的期望支撑窗口来自 gait clock 的 `expected_contact_mask`。分母是该窗口内的期望支撑样本数，分子是同一窗口内 `contact_force_z < force_threshold` 的样本数。
+
+`contact_window_iou` 使用 `intersection / union`。真实接触窗口优先由接触力阈值得到，也可以来自已有 contact flag。若期望和真实窗口都为空，IoU 记为 `1`，避免空 union 产生 NaN。
+
+`compensation_efficiency` 是 diagnostic-only 的事件窗口指标。per-episode evaluator 使用 rollout 内部逐步状态计算已完成事件窗口；离线 event-aligned 脚本 requires per-step diagnostics，需要事件类型、时间戳、接触风险、姿态风险和关节能量等字段。当这些字段或完整窗口不可用时，评估或离线 summary 应显式输出 `nan`。
+
+`nan` 表示该指标无法从当前 Isaac Lab 或 articulation 暴露的字段中可靠计算。常见情况是机器人对象没有 torque limit、joint limit tensor、z 向接触力或完整 per-step diagnostics。

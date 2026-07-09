@@ -23,8 +23,10 @@ METRIC_ORDER = (
     "mean_tracking_error",
     "touchdown_timing_error_mean",
     "foot_slip_ratio",
+    "missed_delayed_support_ratio",
     "stance_duration_deviation_mean",
     "unexpected_contact_count",
+    "contact_window_iou",
     "roll_rms",
     "pitch_rms",
     "base_ang_vel_rms",
@@ -43,6 +45,7 @@ METRIC_ORDER = (
 HIGHER_IS_BETTER = {
     "success",
     "distance_m",
+    "contact_window_iou",
     "joint_limit_margin_min",
     "compensation_phase_alignment",
     "compensation_efficiency",
@@ -73,6 +76,7 @@ def export_metric_table(
     metrics: list[str],
     *,
     include_success_counts: bool = False,
+    diagnostic_only_metrics: list[str] | None = None,
 ) -> None:
     base_columns = ["method", "scenario", "n_episodes"]
     if include_success_counts:
@@ -80,6 +84,9 @@ def export_metric_table(
     columns = base_columns + metric_stat_columns(frame, metrics)
     require_columns(frame, base_columns, filename)
     output = frame.loc[:, columns].copy()
+    for metric in diagnostic_only_metrics or []:
+        if any(column.startswith(f"{metric}_") for column in output.columns):
+            output[f"{metric}_role"] = "diagnostic-only"
     output.to_csv(output_dir / filename, index=False)
 
 
@@ -184,8 +191,9 @@ def main() -> None:
         [
             "touchdown_timing_error_mean",
             "foot_slip_ratio",
-            "stance_duration_deviation_mean",
             "unexpected_contact_count",
+            "missed_delayed_support_ratio",
+            "contact_window_iou",
         ],
     )
     export_metric_table(
@@ -215,6 +223,7 @@ def main() -> None:
             "compensation_phase_alignment",
             "compensation_efficiency",
         ],
+        diagnostic_only_metrics=["compensation_efficiency"],
     )
     export_b3_vs_ours(frame, output_dir)
     print(f"[INFO] Wrote paper tables to {output_dir}")

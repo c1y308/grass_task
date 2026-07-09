@@ -13,6 +13,10 @@ __all__ = [
     "foot_slip_ratio",
     "stance_duration_deviation",
     "unexpected_contact_count",
+    "missed_support_ratio",
+    "contact_window_iou",
+    "contact_risk",
+    "event_window_delta_risk",
     "posture_risk",
     "action_jerk",
     "torque_saturation_ratio",
@@ -128,6 +132,87 @@ def unexpected_contact_count(swing_contact_mask: torch.Tensor) -> torch.Tensor:
     return _sum_non_batch(swing_contact_mask.to(dtype=torch.float32))
 
 
+def missed_support_ratio(
+    expected_contact_mask: torch.Tensor,
+    contact_force_z: torch.Tensor,
+    force_threshold: float | torch.Tensor,
+) -> torch.Tensor:
+    """Contact-risk metric: expected support samples whose vertical contact force is below threshold."""
+    contact_force_z = _as_float_tensor(contact_force_z)
+    expected_contact_mask = _as_tensor(expected_contact_mask, like=contact_force_z).bool()
+    expected_contact_mask, contact_force_z = torch.broadcast_tensors(expected_contact_mask, contact_force_z)
+    force_threshold = _as_float_tensor(force_threshold, like=contact_force_z)
+
+    missed_support = expected_contact_mask & (contact_force_z < force_threshold)
+    missed_count = _sum_non_batch(missed_support.to(dtype=contact_force_z.dtype))
+    expected_count = _sum_non_batch(expected_contact_mask.to(dtype=contact_force_z.dtype))
+    return torch.where(
+        expected_count > 0.0,
+        missed_count / expected_count.clamp_min(1.0),
+        torch.zeros_like(missed_count),
+    )
+
+
+def contact_window_iou(
+    expected_contact_mask: torch.Tensor,
+    real_contact_mask: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Contact-risk metric: intersection over union between expected and real contact windows."""
+    real_contact_mask = _as_tensor(real_contact_mask)
+    expected_contact_mask = _as_tensor(expected_contact_mask).to(device=real_contact_mask.device).bool()
+    if real_contact_mask.dtype == torch.bool:
+        real_contact_mask = real_contact_mask.bool()
+        result_dtype = torch.float32
+    else:
+        result_dtype = real_contact_mask.dtype if real_contact_mask.is_floating_point() else torch.float32
+        real_contact_mask = real_contact_mask > 0.0
+    expected_contact_mask, real_contact_mask = torch.broadcast_tensors(expected_contact_mask, real_contact_mask)
+
+    intersection = expected_contact_mask & real_contact_mask
+    union = expected_contact_mask | real_contact_mask
+    intersection_count = _sum_non_batch(intersection.to(dtype=result_dtype))
+    union_count = _sum_non_batch(union.to(dtype=result_dtype))
+    return torch.where(
+        union_count > 0.0,
+        intersection_count / union_count.clamp_min(eps),
+        torch.ones_like(intersection_count),
+    )
+
+
+def contact_risk(
+    touchdown_error: torch.Tensor,
+    slip_ratio: torch.Tensor,
+    unexpected_contact: torch.Tensor,
+    missed_support: torch.Tensor,
+    weights: Mapping[str, float | torch.Tensor] | Sequence[float | torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Aggregate contact risk from touchdown, slip, unexpected-contact, and missed-support terms."""
+    touchdown_error = _as_float_tensor(touchdown_error)
+    slip_ratio = _as_float_tensor(slip_ratio, like=touchdown_error)
+    unexpected_contact = _as_float_tensor(unexpected_contact, like=touchdown_error)
+    missed_support = _as_float_tensor(missed_support, like=touchdown_error)
+    touchdown_error, slip_ratio, unexpected_contact, missed_support = torch.broadcast_tensors(
+        touchdown_error,
+        slip_ratio,
+        unexpected_contact,
+        missed_support,
+    )
+    return (
+        _weight(weights, "touchdown_error", 0, touchdown_error) * touchdown_error
+        + _weight(weights, "slip_ratio", 1, slip_ratio) * slip_ratio
+        + _weight(weights, "unexpected_contact", 2, unexpected_contact) * unexpected_contact
+        + _weight(weights, "missed_support", 3, missed_support) * missed_support
+    )
+
+
+def event_window_delta_risk(pre_window_risk: torch.Tensor, post_window_risk: torch.Tensor) -> torch.Tensor:
+    """Event-window risk reduction: pre-event window risk minus post-event window risk."""
+    pre_window_risk = _as_float_tensor(pre_window_risk)
+    post_window_risk = _as_float_tensor(post_window_risk, like=pre_window_risk)
+    return _mean_non_batch(pre_window_risk) - _mean_non_batch(post_window_risk)
+
+
 def posture_risk(
     roll: torch.Tensor,
     pitch: torch.Tensor,
@@ -216,7 +301,7 @@ def compensation_efficiency(
     joint_energy: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Compensation-quality metric: contact plus posture risk reduction per unit joint energy."""
+    """Event-window diagnostic: contact plus posture risk reduction per unit joint energy."""
     delta_contact_risk = _as_float_tensor(delta_contact_risk)
     delta_posture_risk = _as_float_tensor(delta_posture_risk, like=delta_contact_risk)
     joint_energy = _as_float_tensor(joint_energy, like=delta_contact_risk)
@@ -252,6 +337,15 @@ if __name__ == "__main__":
         "foot_slip_ratio": foot_slip_ratio(contact, foot_vel),
         "stance_duration_deviation": stance_duration_deviation(real_touchdown, expected_touchdown),
         "unexpected_contact_count": unexpected_contact_count(contact),
+        "missed_support_ratio": missed_support_ratio(contact, torch.tensor([[1.2, 0.0], [0.4, 0.8]]), 0.5),
+        "contact_window_iou": contact_window_iou(contact, torch.tensor([[True, False], [False, True]])),
+        "contact_risk": contact_risk(
+            touchdown_timing_error(real_touchdown, expected_touchdown),
+            foot_slip_ratio(contact, foot_vel),
+            unexpected_contact_count(contact),
+            missed_support_ratio(contact, torch.tensor([[1.2, 0.0], [0.4, 0.8]]), 0.5),
+        ),
+        "event_window_delta_risk": event_window_delta_risk(torch.ones(batch, feet), torch.zeros(batch, feet)),
         "posture_risk": posture_risk(roll, pitch, base_ang_vel),
         "action_jerk": action_jerk(action_t, action_t_minus_1, action_t_minus_2),
         "torque_saturation_ratio": torque_saturation_ratio(torque, torque_limit),

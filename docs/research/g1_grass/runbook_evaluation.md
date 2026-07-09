@@ -132,7 +132,7 @@ Repeat the same process for every method and training seed:
 Check that all expected columns are present:
 
 ```bash
-python -c "import pandas as pd; from pathlib import Path; expected=['method','train_seed','eval_seed','scenario','episode','success','distance_m','mean_tracking_error','touchdown_timing_error_mean','foot_slip_ratio','stance_duration_deviation_mean','unexpected_contact_count','roll_rms','pitch_rms','base_ang_vel_rms','com_height_fluctuation','recovery_time_s','ankle_action_mean','ankle_action_max','torque_peak','torque_rms','torque_saturation_ratio','joint_limit_margin_min','action_jerk','compensation_phase_alignment','compensation_efficiency']; missing={str(p): [c for c in expected if c not in pd.read_csv(p, nrows=1).columns] for p in Path('results/research/g1_grass/evaluation').glob('*.csv')}; print({k:v for k,v in missing.items() if v})"
+python -c "import pandas as pd; from pathlib import Path; expected=['method','train_seed','eval_seed','scenario','episode','success','distance_m','mean_tracking_error','touchdown_timing_error_mean','foot_slip_ratio','missed_delayed_support_ratio','stance_duration_deviation_mean','unexpected_contact_count','contact_window_iou','roll_rms','pitch_rms','base_ang_vel_rms','com_height_fluctuation','recovery_time_s','ankle_action_mean','ankle_action_max','torque_peak','torque_rms','torque_saturation_ratio','joint_limit_margin_min','action_jerk','compensation_phase_alignment','compensation_efficiency']; missing={str(p): [c for c in expected if c not in pd.read_csv(p, nrows=1).columns] for p in Path('results/research/g1_grass/evaluation').glob('*.csv')}; print({k:v for k,v in missing.items() if v})"
 ```
 
 The printed dictionary must be empty.
@@ -197,6 +197,8 @@ Supported event types:
 ```text
 touchdown_error
 foot_slip
+unexpected_contact
+missed_support
 terrain_transition
 ```
 
@@ -205,7 +207,7 @@ Example for an Ours per-step diagnostic CSV:
 ```bash
 python scripts/research/g1_grass/plot_event_aligned.py \
   results/research/g1_grass/diagnostics/Ours_risk_gate_seed1_eval_mild_grass_steps.csv \
-  --event-types touchdown_error,foot_slip,terrain_transition \
+  --event-types touchdown_error,foot_slip,unexpected_contact,missed_support,terrain_transition \
   --window -0.5 1.0 \
   --output-dir results/research/g1_grass/figures \
   --prefix Ours_risk_gate_seed1_eval_mild_grass

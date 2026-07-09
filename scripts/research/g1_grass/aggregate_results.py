@@ -15,6 +15,31 @@ DEFAULT_OUTPUT = REPO_ROOT / "results" / "research" / "g1_grass" / "aggregated_m
 GROUP_COLUMNS = ("method", "scenario")
 REQUIRED_COLUMNS = ("method", "scenario", "success")
 ID_NUMERIC_COLUMNS = {"train_seed", "eval_seed", "episode"}
+PREFERRED_METRIC_ORDER = (
+    "success",
+    "distance_m",
+    "mean_tracking_error",
+    "touchdown_timing_error_mean",
+    "foot_slip_ratio",
+    "missed_delayed_support_ratio",
+    "stance_duration_deviation_mean",
+    "unexpected_contact_count",
+    "contact_window_iou",
+    "roll_rms",
+    "pitch_rms",
+    "base_ang_vel_rms",
+    "com_height_fluctuation",
+    "recovery_time_s",
+    "ankle_action_mean",
+    "ankle_action_max",
+    "torque_peak",
+    "torque_rms",
+    "torque_saturation_ratio",
+    "joint_limit_margin_min",
+    "action_jerk",
+    "compensation_phase_alignment",
+    "compensation_efficiency",
+)
 DEFAULT_BOOTSTRAP_SAMPLES = 10_000
 DEFAULT_BOOTSTRAP_SEED = 12345
 
@@ -93,7 +118,10 @@ def numeric_metric_columns(data: pd.DataFrame) -> list[str]:
                 data[column] = converted
 
     numeric_columns = data.select_dtypes(include=[np.number]).columns.tolist()
-    return [column for column in numeric_columns if column not in ID_NUMERIC_COLUMNS]
+    metric_columns = [column for column in numeric_columns if column not in ID_NUMERIC_COLUMNS]
+    ordered = [column for column in PREFERRED_METRIC_ORDER if column in metric_columns]
+    ordered.extend(column for column in metric_columns if column not in ordered)
+    return ordered
 
 
 def bootstrap_mean_ci(values: pd.Series, rng: np.random.Generator, n_samples: int) -> tuple[float, float]:

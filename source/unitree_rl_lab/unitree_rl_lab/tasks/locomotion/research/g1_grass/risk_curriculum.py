@@ -154,7 +154,13 @@ class SuccessRateGateProgression:
 
 @dataclass
 class RiskGateProgression:
-    """Risk-gated progression with success, contact, posture, and compensation gates."""
+    """Risk-gated progression with success, contact, posture, and compensation gates.
+
+    ``contact_risk`` is expected to be the aggregate of touchdown timing error, slip ratio,
+    unexpected contact, and missed support. ``compensation_risk`` must be a safety-boundary
+    risk such as torque saturation, joint-limit proximity/margin, action jerk, or
+    ``1 - compensation_phase_alignment``; compensation efficiency is diagnostic-only.
+    """
 
     success_threshold: float
     contact_threshold: float
@@ -179,7 +185,7 @@ class RiskGateProgression:
             raise ValueError(f"min_steps_per_stage must be non-negative, got {self.min_steps_per_stage}.")
 
     def should_promote(self, state: CurriculumState, metrics: Metrics) -> PromotionDecision:
-        """Promote only when success, three risk gates, and minimum dwell time all pass."""
+        """Promote only when success, three named risk gates, and minimum dwell time all pass."""
         failed_gates: list[str] = []
         success_rate = _metric_value(metrics, "success_rate")
         contact_risk = _metric_value(metrics, "contact_risk")

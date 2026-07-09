@@ -102,9 +102,9 @@ This document is filled after experiments are complete. Do not add inferred resu
 
 ## Table 2 Contact Risk Metrics
 
-| method | scenario | n_episodes | foot_slip_ratio_mean | foot_slip_ratio_std | foot_slip_ratio_median | foot_slip_ratio_ci95_low | foot_slip_ratio_ci95_high | unexpected_contact_count_mean | unexpected_contact_count_std | unexpected_contact_count_median | unexpected_contact_count_ci95_low | unexpected_contact_count_ci95_high | touchdown_timing_error_mean_mean | stance_duration_deviation_mean_mean |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | | | | | | | | | |
+| method | scenario | n_episodes | foot_slip_ratio_mean | foot_slip_ratio_std | foot_slip_ratio_median | foot_slip_ratio_ci95_low | foot_slip_ratio_ci95_high | unexpected_contact_count_mean | unexpected_contact_count_std | unexpected_contact_count_median | unexpected_contact_count_ci95_low | unexpected_contact_count_ci95_high | missed_delayed_support_ratio_mean | missed_delayed_support_ratio_std | missed_delayed_support_ratio_median | missed_delayed_support_ratio_ci95_low | missed_delayed_support_ratio_ci95_high | contact_window_iou_mean | contact_window_iou_std | contact_window_iou_median | contact_window_iou_ci95_low | contact_window_iou_ci95_high | touchdown_timing_error_mean_mean | stance_duration_deviation_mean_mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | | | | | | | | | | | | | | | | | | |
 
 ## Table 3 Posture Risk Metrics
 

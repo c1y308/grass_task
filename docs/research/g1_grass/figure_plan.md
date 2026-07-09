@@ -16,14 +16,15 @@
 
 - 使用 aggregated evaluation metrics，按 method 和 scenario 展示 success rate、contact risk、posture risk。
 - 建议包含 bootstrap 95% CI。
-- contact risk 可包含 touchdown timing error、foot slip ratio、stance duration deviation、unexpected contact count。
+- contact risk 可包含 touchdown timing error、foot slip ratio、unexpected contact count、missed/delayed support ratio、contact-window IoU。
 - posture risk 可包含 roll RMS、pitch RMS、base angular velocity RMS、COM height fluctuation、recovery time。
 
 ## Figure 4: Event-Aligned Compensation Analysis
 
 - 使用 per-step diagnostic CSV/parquet，经 `scripts/research/g1_grass/plot_event_aligned.py` 生成。
-- 分别围绕 `touchdown_error`、`foot_slip`、`terrain_transition` 对齐时间轴，默认窗口为 event 前 `0.5 s` 到 event 后 `1.0 s`。
-- 子图包含 slip velocity、roll/pitch error、ankle action amplitude、torque saturation indicator、action jerk。
+- 分别围绕 `touchdown_error`、`foot_slip`、`unexpected_contact`、`missed_support`、`terrain_transition` 对齐时间轴，默认窗口为 event 前 `0.5 s` 到 event 后 `1.0 s`。
+- 子图包含 expected contact mask、real contact mask、roll/pitch error、ankle action amplitude、torque saturation indicator、action jerk。
+- 同步输出 event-window compensation efficiency summary；该 summary 是 diagnostic-only，不进入 curriculum gate。
 - 目标是解释 Ours 是否在接触扰动后产生更及时、更低饱和、更平滑的补偿。
 
 ## Figure 5: Sim2Sim Or Real G1 Qualitative Sequence If Available

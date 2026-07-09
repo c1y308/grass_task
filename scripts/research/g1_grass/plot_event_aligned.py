@@ -19,7 +19,7 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "research" / "g1_grass" / "figures"
-EVENT_TYPES = ("touchdown_error", "foot_slip", "terrain_transition")
+EVENT_TYPES = ("touchdown_error", "foot_slip", "unexpected_contact", "missed_support", "terrain_transition")
 DEFAULT_WINDOW = (-0.5, 1.0)
 DEFAULT_BIN_SIZE = 0.02
 DEFAULT_MAX_EVENTS = 500
@@ -46,6 +46,19 @@ TRAJECTORY_COLUMN_CANDIDATES = (
 EVENT_COLUMN_CANDIDATES = ("event_type", "event", "event_name")
 
 METRIC_CANDIDATES = {
+    "expected_contact_mask": (
+        "expected_contact_mask",
+        "expected_contact",
+        "expected_stance_mask",
+        "gait_expected_contact",
+    ),
+    "real_contact_mask": (
+        "real_contact_mask",
+        "real_contact",
+        "contact_mask",
+        "foot_contact_mask",
+        "is_contact",
+    ),
     "slip_velocity": (
         "slip_velocity",
         "slip_velocity_mps",
@@ -73,7 +86,14 @@ METRIC_CANDIDATES = {
     "action_jerk": ("action_jerk", "action_jerk_norm", "policy_action_jerk"),
 }
 
+EFFICIENCY_COLUMN_CANDIDATES = {
+    "contact_risk": ("contact_risk", "contact_risk_step", "event_contact_risk"),
+    "posture_risk": ("posture_risk", "posture_risk_step", "event_posture_risk"),
+    "joint_energy": ("joint_energy", "joint_energy_j", "joint_mechanical_energy", "comp_energy", "comp_energy_j"),
+}
+
 PANEL_SPECS = (
+    ("contact_masks", "Expected / real contact mask", "mask"),
     ("slip_velocity", "Slip velocity", "m/s"),
     ("roll_pitch", "Roll / pitch error", "rad"),
     ("ankle_action", "Ankle action amplitude", "action unit"),
@@ -134,6 +154,15 @@ def coerce_numeric(frame: pd.DataFrame, columns: Iterable[str]) -> None:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
 
+def coerce_binary_series(values: pd.Series) -> pd.Series:
+    if values.dtype == object:
+        normalized = values.fillna("").astype(str).str.strip().str.lower()
+        mapped = normalized.map({"1": 1.0, "true": 1.0, "yes": 1.0, "0": 0.0, "false": 0.0, "no": 0.0})
+        numeric = pd.to_numeric(values, errors="coerce")
+        return mapped.fillna(numeric)
+    return pd.to_numeric(values, errors="coerce")
+
+
 def detect_event_mask(frame: pd.DataFrame, event_type: str, event_column: str | None) -> pd.Series:
     if event_column is not None:
         events = frame[event_column]
@@ -164,6 +193,10 @@ def detect_event_mask(frame: pd.DataFrame, event_type: str, event_column: str | 
 
 def metric_column_map(frame: pd.DataFrame, args: argparse.Namespace) -> dict[str, str | None]:
     return {
+        "expected_contact_mask": optional_column(
+            frame, METRIC_CANDIDATES["expected_contact_mask"], args.expected_contact_column
+        ),
+        "real_contact_mask": optional_column(frame, METRIC_CANDIDATES["real_contact_mask"], args.real_contact_column),
         "slip_velocity": optional_column(frame, METRIC_CANDIDATES["slip_velocity"], args.slip_column),
         "roll": optional_column(frame, METRIC_CANDIDATES["roll"], args.roll_column),
         "pitch": optional_column(frame, METRIC_CANDIDATES["pitch"], args.pitch_column),
@@ -175,8 +208,26 @@ def metric_column_map(frame: pd.DataFrame, args: argparse.Namespace) -> dict[str
     }
 
 
+def efficiency_column_map(frame: pd.DataFrame, args: argparse.Namespace) -> dict[str, str | None]:
+    return {
+        "contact_risk": optional_column(frame, EFFICIENCY_COLUMN_CANDIDATES["contact_risk"], args.contact_risk_column),
+        "posture_risk": optional_column(frame, EFFICIENCY_COLUMN_CANDIDATES["posture_risk"], args.posture_risk_column),
+        "joint_energy": optional_column(frame, EFFICIENCY_COLUMN_CANDIDATES["joint_energy"], args.joint_energy_column),
+    }
+
+
 def add_plot_metrics(frame: pd.DataFrame, columns: dict[str, str | None]) -> dict[str, list[tuple[str, str]]]:
     metrics: dict[str, list[tuple[str, str]]] = {}
+
+    contact_masks = []
+    if columns["expected_contact_mask"] is not None:
+        frame["_expected_contact_mask"] = coerce_binary_series(frame[columns["expected_contact_mask"]])
+        contact_masks.append(("_expected_contact_mask", "expected"))
+    if columns["real_contact_mask"] is not None:
+        frame["_real_contact_mask"] = coerce_binary_series(frame[columns["real_contact_mask"]])
+        contact_masks.append(("_real_contact_mask", "real"))
+    if contact_masks:
+        metrics["contact_masks"] = contact_masks
 
     if columns["slip_velocity"] is not None:
         metrics["slip_velocity"] = [(columns["slip_velocity"], "slip velocity")]
@@ -371,6 +422,58 @@ def plot_event_figure(
     print(f"[INFO] Wrote {pdf_path}")
 
 
+def event_window_compensation_efficiency_summary(
+    aligned: pd.DataFrame,
+    event_type: str,
+    efficiency_columns: dict[str, str | None],
+    group_column: str | None,
+) -> pd.DataFrame:
+    group_cols = ["event_id", "event_time_s"]
+    if group_column is not None and group_column in aligned.columns:
+        group_cols.insert(0, group_column)
+
+    missing = [name for name, column in efficiency_columns.items() if column is None or column not in aligned.columns]
+    rows = []
+    for keys, event_window in aligned.groupby(group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = dict(zip(group_cols, keys))
+        row["event_type"] = event_type
+        pre_window = event_window[event_window["relative_time_s"] < 0.0]
+        post_window = event_window[event_window["relative_time_s"] >= 0.0]
+        row["n_pre_samples"] = int(len(pre_window))
+        row["n_post_samples"] = int(len(post_window))
+
+        if missing or pre_window.empty or post_window.empty:
+            row["delta_contact_risk"] = np.nan
+            row["delta_posture_risk"] = np.nan
+            row["joint_energy"] = np.nan
+            row["compensation_efficiency"] = np.nan
+            row["status"] = "requires per-step diagnostics" if missing else "empty event window"
+            rows.append(row)
+            continue
+
+        contact_col = efficiency_columns["contact_risk"]
+        posture_col = efficiency_columns["posture_risk"]
+        energy_col = efficiency_columns["joint_energy"]
+        delta_contact = pre_window[contact_col].mean() - post_window[contact_col].mean()
+        delta_posture = pre_window[posture_col].mean() - post_window[posture_col].mean()
+        joint_energy = post_window[energy_col].sum()
+        if pd.notna(joint_energy) and joint_energy > 0.0:
+            efficiency = (delta_contact + delta_posture) / joint_energy
+        else:
+            efficiency = np.nan
+
+        row["delta_contact_risk"] = float(delta_contact) if pd.notna(delta_contact) else np.nan
+        row["delta_posture_risk"] = float(delta_posture) if pd.notna(delta_posture) else np.nan
+        row["joint_energy"] = float(joint_energy) if pd.notna(joint_energy) else np.nan
+        row["compensation_efficiency"] = float(efficiency) if pd.notna(efficiency) else np.nan
+        row["status"] = "ok"
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot event-aligned G1 grass compensation diagnostics.")
     parser.add_argument("input", type=Path, help="Per-step diagnostic CSV or parquet file.")
@@ -389,12 +492,29 @@ def main() -> None:
         help="Time window around each event in seconds. Default: -0.5 1.0.",
     )
     parser.add_argument("--bin-size", type=float, default=DEFAULT_BIN_SIZE, help="Aligned time bin size in seconds.")
-    parser.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS, help="Maximum events per type; <=0 uses all.")
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        default=DEFAULT_MAX_EVENTS,
+        help="Maximum events per type; <=0 uses all.",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Figure output directory.")
     parser.add_argument("--prefix", type=str, default="event_aligned", help="Output file prefix.")
     parser.add_argument("--time-column", type=str, default=None, help="Override time column.")
     parser.add_argument("--event-column", type=str, default=None, help="Override event type/name column.")
-    parser.add_argument("--group-column", type=str, default="method", help="Column used for plot grouping; use none to disable.")
+    parser.add_argument(
+        "--group-column",
+        type=str,
+        default="method",
+        help="Column used for plot grouping; use none to disable.",
+    )
+    parser.add_argument(
+        "--expected-contact-column",
+        type=str,
+        default=None,
+        help="Override expected contact mask column.",
+    )
+    parser.add_argument("--real-contact-column", type=str, default=None, help="Override real contact mask column.")
     parser.add_argument("--slip-column", type=str, default=None, help="Override slip velocity column.")
     parser.add_argument("--roll-column", type=str, default=None, help="Override roll error column.")
     parser.add_argument("--pitch-column", type=str, default=None, help="Override pitch error column.")
@@ -403,6 +523,9 @@ def main() -> None:
         "--torque-saturation-column", type=str, default=None, help="Override torque saturation indicator column."
     )
     parser.add_argument("--action-jerk-column", type=str, default=None, help="Override action jerk column.")
+    parser.add_argument("--contact-risk-column", type=str, default=None, help="Override per-step contact risk column.")
+    parser.add_argument("--posture-risk-column", type=str, default=None, help="Override per-step posture risk column.")
+    parser.add_argument("--joint-energy-column", type=str, default=None, help="Override per-step joint energy column.")
     args = parser.parse_args()
 
     if args.window[0] >= args.window[1]:
@@ -419,11 +542,31 @@ def main() -> None:
         group_column = None
 
     columns = metric_column_map(frame, args)
-    numeric_columns = [time_column] + [column for column in columns.values() if column is not None]
+    efficiency_columns = efficiency_column_map(frame, args)
+    missing_efficiency_columns = [
+        name for name, column in efficiency_columns.items() if column is None or column not in frame.columns
+    ]
+    if missing_efficiency_columns:
+        print(
+            "[WARN] Missing columns for compensation efficiency summary: "
+            f"{', '.join(missing_efficiency_columns)}. Values will be NaN."
+        )
+
+    numeric_columns = (
+        [time_column]
+        + [
+            column
+            for key, column in columns.items()
+            if column is not None and key not in {"expected_contact_mask", "real_contact_mask"}
+        ]
+        + [column for column in efficiency_columns.values() if column is not None]
+    )
     coerce_numeric(frame, numeric_columns)
     frame = frame.dropna(subset=[time_column]).sort_values(time_column).reset_index(drop=True)
     metrics = add_plot_metrics(frame, columns)
     trajectory_cols = trajectory_columns(frame, time_column)
+    output_dir = resolve_path(args.output_dir)
+    efficiency_summaries = []
 
     for event_type in args.event_types:
         events = event_records(frame, event_type, time_column, event_column, trajectory_cols, args.max_events)
@@ -434,7 +577,17 @@ def main() -> None:
         if aligned.empty:
             print(f"[WARN] No aligned samples found for {event_type}; skipping.")
             continue
-        plot_event_figure(aligned, event_type, metrics, group_column, resolve_path(args.output_dir), args.prefix)
+        plot_event_figure(aligned, event_type, metrics, group_column, output_dir, args.prefix)
+        efficiency_summaries.append(
+            event_window_compensation_efficiency_summary(aligned, event_type, efficiency_columns, group_column)
+        )
+
+    if efficiency_summaries:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summary = pd.concat(efficiency_summaries, ignore_index=True, sort=False)
+        summary_path = output_dir / f"{args.prefix}_compensation_efficiency_summary.csv"
+        summary.to_csv(summary_path, index=False)
+        print(f"[INFO] Wrote {summary_path}")
 
 
 if __name__ == "__main__":

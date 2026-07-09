@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REQUESTED_HELP = any(arg in {"-h", "--help"} for arg in sys.argv[1:])
+
 from isaaclab.app import AppLauncher
 
 
@@ -45,8 +47,10 @@ CSV_COLUMNS = (
     "mean_tracking_error",
     "touchdown_timing_error_mean",
     "foot_slip_ratio",
+    "missed_delayed_support_ratio",
     "stance_duration_deviation_mean",
     "unexpected_contact_count",
+    "contact_window_iou",
     "roll_rms",
     "pitch_rms",
     "base_ang_vel_rms",
@@ -67,6 +71,9 @@ GAIT_PERIOD_S = 0.8
 GAIT_OFFSETS = (0.0, 0.5)
 STANCE_THRESHOLD = 0.55
 FOOT_SLIP_VELOCITY_THRESHOLD = 0.20
+CONTACT_FORCE_THRESHOLD_N = 1.0
+COMPENSATION_EFFICIENCY_EVENT_TYPES = ("foot_slip", "unexpected_contact", "missed_support")
+COMPENSATION_EFFICIENCY_WINDOW_S = (-0.25, 0.50)
 STABLE_TRACKING_ERROR = 0.20
 UNSTABLE_TRACKING_ERROR = 0.35
 STABLE_TILT_RAD = 0.20
@@ -91,6 +98,9 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 cli_args.add_rsl_rl_args(parser)
+if REQUESTED_HELP:
+    parser.print_help()
+    raise SystemExit(0)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -105,6 +115,10 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
+
+from isaaclab_platform_compat import patch_conda_forge_sys_version_for_isaaclab
+
+patch_conda_forge_sys_version_for_isaaclab()
 
 import gymnasium as gym
 import numpy as np
@@ -255,6 +269,13 @@ def tensor_like(value: Any, *, device: torch.device, dtype: torch.dtype = torch.
 
 def zeros(num_envs: int, device: torch.device) -> torch.Tensor:
     return torch.zeros(num_envs, device=device, dtype=torch.float32)
+
+
+def event_window_step_counts(dt: float) -> tuple[int, int]:
+    pre_window_s, post_window_s = COMPENSATION_EFFICIENCY_WINDOW_S
+    pre_steps = max(1, int(math.ceil(abs(min(pre_window_s, 0.0)) / dt)))
+    post_steps = max(1, int(math.ceil(max(post_window_s, dt) / dt)))
+    return pre_steps, post_steps
 
 
 def resolve_ids(entity: Any, finder_name: str, pattern: str) -> list[int]:
@@ -410,12 +431,22 @@ def collect_state(unwrapped_env: Any, actions: torch.Tensor, eval_ids: dict[str,
     if contact_sensor is not None and contact_body_ids:
         contact_time = contact_sensor.data.current_contact_time[:, contact_body_ids]
         contact_mask = contact_time > 0.0
+        net_forces_w = getattr(contact_sensor.data, "net_forces_w", None)
+        if net_forces_w is not None:
+            contact_force_z = torch.abs(net_forces_w[:, contact_body_ids, 2])
+        else:
+            contact_force_z = torch.full_like(contact_time, float("nan"))
+        has_contact_observation = torch.ones(num_envs, device=device, dtype=torch.bool)
     elif foot_body_ids:
         contact_time = torch.zeros((num_envs, len(foot_body_ids)), device=device)
         contact_mask = torch.zeros_like(contact_time, dtype=torch.bool)
+        contact_force_z = torch.full_like(contact_time, float("nan"))
+        has_contact_observation = torch.zeros(num_envs, device=device, dtype=torch.bool)
     else:
         contact_time = torch.zeros((num_envs, 0), device=device)
         contact_mask = torch.zeros((num_envs, 0), device=device, dtype=torch.bool)
+        contact_force_z = torch.zeros((num_envs, 0), device=device)
+        has_contact_observation = torch.zeros(num_envs, device=device, dtype=torch.bool)
 
     return {
         "root_pos": root_pos,
@@ -431,6 +462,8 @@ def collect_state(unwrapped_env: Any, actions: torch.Tensor, eval_ids: dict[str,
         "foot_xy_velocity": foot_xy_velocity,
         "foot_contact_time": contact_time,
         "foot_contact_mask": contact_mask,
+        "foot_contact_force_z": contact_force_z,
+        "has_contact_observation": has_contact_observation,
     }
 
 
@@ -464,8 +497,10 @@ def init_accumulators(
     device: torch.device,
     root_pos: torch.Tensor,
     actions: torch.Tensor,
+    dt: float,
 ) -> dict[str, torch.Tensor]:
     action_dim = actions.shape[1]
+    pre_window_steps, post_window_steps = event_window_step_counts(dt)
     accum = {
         "elapsed_s": zeros(num_envs, device),
         "distance_m": zeros(num_envs, device),
@@ -477,7 +512,13 @@ def init_accumulators(
         "stance_duration_deviation_count": zeros(num_envs, device),
         "slip_count": zeros(num_envs, device),
         "contact_count": zeros(num_envs, device),
+        "missed_support_count": zeros(num_envs, device),
+        "expected_support_count": zeros(num_envs, device),
+        "support_force_observed_count": zeros(num_envs, device),
         "unexpected_contact_count": zeros(num_envs, device),
+        "contact_iou_intersection": zeros(num_envs, device),
+        "contact_iou_union": zeros(num_envs, device),
+        "contact_iou_observed_count": zeros(num_envs, device),
         "roll_sq_sum": zeros(num_envs, device),
         "pitch_sq_sum": zeros(num_envs, device),
         "base_ang_vel_sq_sum": zeros(num_envs, device),
@@ -499,8 +540,24 @@ def init_accumulators(
         "action_jerk_count": zeros(num_envs, device),
         "comp_energy_total": zeros(num_envs, device),
         "comp_energy_valid_window": zeros(num_envs, device),
-        "risk_reduction_sum": zeros(num_envs, device),
-        "prev_risk": torch.full((num_envs,), float("nan"), device=device),
+        "event_pre_contact_history": torch.zeros((num_envs, pre_window_steps), device=device),
+        "event_pre_posture_history": torch.zeros((num_envs, pre_window_steps), device=device),
+        "event_pre_valid_history": torch.zeros((num_envs, pre_window_steps), device=device),
+        "event_window_count": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_pre_contact_sum": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_pre_posture_sum": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_pre_count": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_post_contact_sum": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_post_posture_sum": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_joint_energy": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_window_post_count": torch.zeros((num_envs, post_window_steps), device=device),
+        "event_completed_pre_contact_sum": zeros(num_envs, device),
+        "event_completed_pre_posture_sum": zeros(num_envs, device),
+        "event_completed_pre_count": zeros(num_envs, device),
+        "event_completed_post_contact_sum": zeros(num_envs, device),
+        "event_completed_post_posture_sum": zeros(num_envs, device),
+        "event_completed_joint_energy": zeros(num_envs, device),
+        "event_completed_post_count": zeros(num_envs, device),
         "recovery_active": torch.zeros(num_envs, device=device, dtype=torch.bool),
         "prev_root_xy": root_pos[:, :2].clone(),
         "prev_actions": actions.clone(),
@@ -517,13 +574,78 @@ def reset_accumulator(accum: dict[str, torch.Tensor], env_id: int, root_pos: tor
             value[env_id] = False
         elif key == "joint_limit_margin_min":
             value[env_id] = float("inf")
-        elif key == "prev_risk":
-            value[env_id] = float("nan")
         else:
             value[env_id] = 0.0
     accum["prev_root_xy"][env_id] = root_pos[env_id, :2]
     accum["prev_actions"][env_id] = actions[env_id]
     accum["prev_prev_actions"][env_id] = 0.0
+
+
+def update_event_window_accumulators(
+    accum: dict[str, torch.Tensor],
+    contact_risk_step: torch.Tensor,
+    posture_risk_step: torch.Tensor,
+    joint_energy_step: torch.Tensor,
+    event_count_step: torch.Tensor,
+) -> None:
+    event_count_step = event_count_step.to(dtype=contact_risk_step.dtype)
+    pre_contact_history = accum["event_pre_contact_history"]
+    pre_posture_history = accum["event_pre_posture_history"]
+    pre_valid_history = accum["event_pre_valid_history"]
+
+    pre_contact_sum = pre_contact_history.sum(dim=-1)
+    pre_posture_sum = pre_posture_history.sum(dim=-1)
+    pre_count = pre_valid_history.sum(dim=-1)
+
+    if torch.any(event_count_step > 0.0):
+        accum["event_window_count"][:, 0] += event_count_step
+        accum["event_window_pre_contact_sum"][:, 0] += pre_contact_sum * event_count_step
+        accum["event_window_pre_posture_sum"][:, 0] += pre_posture_sum * event_count_step
+        accum["event_window_pre_count"][:, 0] += pre_count * event_count_step
+
+    window_count = accum["event_window_count"]
+    contact_view = contact_risk_step.reshape(-1, 1)
+    posture_view = posture_risk_step.reshape(-1, 1)
+    energy_view = joint_energy_step.reshape(-1, 1)
+    accum["event_window_post_contact_sum"] += contact_view * window_count
+    accum["event_window_post_posture_sum"] += posture_view * window_count
+    accum["event_window_joint_energy"] += energy_view * window_count
+    accum["event_window_post_count"] += window_count
+
+    last_index = window_count.shape[1] - 1
+    completed_pre_count = accum["event_window_pre_count"][:, last_index]
+    completed_post_count = accum["event_window_post_count"][:, last_index]
+    completed_valid = ((completed_pre_count > 0.0) & (completed_post_count > 0.0)).to(dtype=contact_risk_step.dtype)
+    accum["event_completed_pre_contact_sum"] += accum["event_window_pre_contact_sum"][:, last_index] * completed_valid
+    accum["event_completed_pre_posture_sum"] += accum["event_window_pre_posture_sum"][:, last_index] * completed_valid
+    accum["event_completed_pre_count"] += completed_pre_count * completed_valid
+    accum["event_completed_post_contact_sum"] += accum["event_window_post_contact_sum"][:, last_index] * completed_valid
+    accum["event_completed_post_posture_sum"] += accum["event_window_post_posture_sum"][:, last_index] * completed_valid
+    accum["event_completed_joint_energy"] += accum["event_window_joint_energy"][:, last_index] * completed_valid
+    accum["event_completed_post_count"] += completed_post_count * completed_valid
+
+    for key in (
+        "event_window_count",
+        "event_window_pre_contact_sum",
+        "event_window_pre_posture_sum",
+        "event_window_pre_count",
+        "event_window_post_contact_sum",
+        "event_window_post_posture_sum",
+        "event_window_joint_energy",
+        "event_window_post_count",
+    ):
+        value = accum[key]
+        shifted = torch.zeros_like(value)
+        if value.shape[1] > 1:
+            shifted[:, 1:] = value[:, :-1]
+        value[:] = shifted
+
+    pre_contact_history[:, :-1] = pre_contact_history[:, 1:].clone()
+    pre_contact_history[:, -1] = contact_risk_step
+    pre_posture_history[:, :-1] = pre_posture_history[:, 1:].clone()
+    pre_posture_history[:, -1] = posture_risk_step
+    pre_valid_history[:, :-1] = pre_valid_history[:, 1:].clone()
+    pre_valid_history[:, -1] = 1.0
 
 
 def update_accumulators(
@@ -551,17 +673,25 @@ def update_accumulators(
     expected_contact, expected_stance_elapsed = gait_expectation(accum["elapsed_s"], num_feet)
     contact_mask = state["foot_contact_mask"]
     contact_time = state["foot_contact_time"]
+    contact_force_z = state["foot_contact_force_z"]
+    has_contact_observation = state["has_contact_observation"].bool()
+    contact_risk_step = zeros(num_envs, device)
+    event_count_step = zeros(num_envs, device)
 
     if num_feet:
         foot_speed = torch.linalg.vector_norm(state["foot_xy_velocity"], dim=-1)
         slip_mask = contact_mask & (foot_speed > FOOT_SLIP_VELOCITY_THRESHOLD)
-        accum["slip_count"] += slip_mask.float().sum(dim=-1)
-        accum["contact_count"] += contact_mask.float().sum(dim=-1)
+        slip_count_step = slip_mask.float().sum(dim=-1)
+        contact_count_step = contact_mask.float().sum(dim=-1)
+        accum["slip_count"] += slip_count_step
+        accum["contact_count"] += contact_count_step
 
         timing_mask = expected_contact | contact_mask
         timing_error = torch.abs(contact_time - expected_stance_elapsed)
-        accum["touchdown_timing_error_sum"] += (timing_error * timing_mask.float()).sum(dim=-1)
-        accum["touchdown_timing_error_count"] += timing_mask.float().sum(dim=-1)
+        timing_error_sum_step = (timing_error * timing_mask.float()).sum(dim=-1)
+        timing_error_count_step = timing_mask.float().sum(dim=-1)
+        accum["touchdown_timing_error_sum"] += timing_error_sum_step
+        accum["touchdown_timing_error_count"] += timing_error_count_step
 
         stance_mask = expected_contact & contact_mask
         stance_error = torch.abs(contact_time - expected_stance_elapsed)
@@ -569,13 +699,57 @@ def update_accumulators(
         accum["stance_duration_deviation_count"] += stance_mask.float().sum(dim=-1)
 
         unexpected_contact = contact_mask & ~expected_contact
-        accum["unexpected_contact_count"] += unexpected_contact.float().sum(dim=-1)
+        unexpected_contact_count_step = unexpected_contact.float().sum(dim=-1)
+        accum["unexpected_contact_count"] += unexpected_contact_count_step
+
+        force_observed = torch.isfinite(contact_force_z)
+        support_force_observed = force_observed.any(dim=-1)
+        expected_with_force = expected_contact & force_observed
+        missed_support = expected_with_force & (contact_force_z < CONTACT_FORCE_THRESHOLD_N)
+        missed_support_count_step = missed_support.float().sum(dim=-1)
+        expected_support_count_step = expected_with_force.float().sum(dim=-1)
+        accum["missed_support_count"] += missed_support_count_step
+        accum["expected_support_count"] += expected_support_count_step
+        accum["support_force_observed_count"] += support_force_observed.float()
+
+        real_contact_mask = torch.where(force_observed, contact_force_z > CONTACT_FORCE_THRESHOLD_N, contact_mask)
+        observed_contact = has_contact_observation.reshape(num_envs, 1)
+        contact_union = (expected_contact | real_contact_mask) & observed_contact
+        contact_intersection = expected_contact & real_contact_mask & observed_contact
+        accum["contact_iou_intersection"] += contact_intersection.float().sum(dim=-1)
+        accum["contact_iou_union"] += contact_union.float().sum(dim=-1)
+        accum["contact_iou_observed_count"] += has_contact_observation.float()
+
+        touchdown_risk_step = torch.where(
+            timing_error_count_step > 0.0,
+            timing_error_sum_step / timing_error_count_step.clamp_min(1.0),
+            zeros(num_envs, device),
+        )
+        slip_ratio_step = torch.where(
+            contact_count_step > 0.0,
+            slip_count_step / contact_count_step.clamp_min(1.0),
+            zeros(num_envs, device),
+        )
+        missed_support_ratio_step = torch.where(
+            expected_support_count_step > 0.0,
+            missed_support_count_step / expected_support_count_step.clamp_min(1.0),
+            zeros(num_envs, device),
+        )
+        contact_risk_step = (
+            touchdown_risk_step + slip_ratio_step + unexpected_contact_count_step + missed_support_ratio_step
+        )
+        event_count_step = (
+            slip_mask.any(dim=-1).float()
+            + unexpected_contact.any(dim=-1).float()
+            + missed_support.any(dim=-1).float()
+        )
     else:
         foot_speed = torch.zeros((num_envs, 0), device=device)
 
     roll = state["roll"]
     pitch = state["pitch"]
     base_ang_vel_mag = torch.linalg.vector_norm(state["root_ang_vel"], dim=-1)
+    posture_risk_step = torch.abs(roll) + torch.abs(pitch) + 0.1 * base_ang_vel_mag
     accum["roll_sq_sum"] += roll.square()
     accum["pitch_sq_sum"] += pitch.square()
     accum["base_ang_vel_sq_sum"] += base_ang_vel_mag.square()
@@ -624,20 +798,13 @@ def update_accumulators(
 
     comp_energy = (state["joint_vel"].abs() * torque.abs()).sum(dim=-1) * dt
     accum["comp_energy_total"] += comp_energy
-    valid_window = (expected_contact & contact_mask).any(dim=-1) if num_feet else torch.zeros(num_envs, device=device).bool()
-    accum["comp_energy_valid_window"] += comp_energy * valid_window.float()
-
-    slip_ratio_step = torch.where(
-        contact_mask.any(dim=-1) if num_feet else torch.zeros(num_envs, device=device).bool(),
-        slip_mask.float().sum(dim=-1) / contact_mask.float().sum(dim=-1).clamp_min(1.0) if num_feet else zeros(num_envs, device),
-        zeros(num_envs, device),
+    valid_window = (
+        (expected_contact & contact_mask).any(dim=-1)
+        if num_feet
+        else torch.zeros(num_envs, device=device).bool()
     )
-    posture_risk = torch.abs(roll) + torch.abs(pitch) + 0.1 * base_ang_vel_mag
-    current_risk = tracking_error + posture_risk + slip_ratio_step
-    prev_risk = accum["prev_risk"]
-    valid_prev = ~torch.isnan(prev_risk)
-    accum["risk_reduction_sum"] += torch.where(valid_prev, torch.relu(prev_risk - current_risk), zeros(num_envs, device))
-    accum["prev_risk"][:] = current_risk
+    accum["comp_energy_valid_window"] += comp_energy * valid_window.float()
+    update_event_window_accumulators(accum, contact_risk_step, posture_risk_step, comp_energy, event_count_step)
 
     unstable = (
         (tracking_error > UNSTABLE_TRACKING_ERROR)
@@ -676,6 +843,37 @@ def safe_ratio(numerator: torch.Tensor, denominator: torch.Tensor, env_id: int) 
     return float((numerator[env_id] / denominator[env_id]).detach().cpu())
 
 
+def safe_ratio_with_observation(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    observed_count: torch.Tensor,
+    env_id: int,
+    *,
+    empty_value: float,
+) -> float:
+    observed = float(observed_count[env_id].detach().cpu())
+    if observed <= 0.0:
+        return float("nan")
+    denom = float(denominator[env_id].detach().cpu())
+    if denom <= 0.0:
+        return empty_value
+    return float((numerator[env_id] / denominator[env_id]).detach().cpu())
+
+
+def event_compensation_efficiency(accum: dict[str, torch.Tensor], env_id: int) -> float:
+    pre_count = float(accum["event_completed_pre_count"][env_id].detach().cpu())
+    post_count = float(accum["event_completed_post_count"][env_id].detach().cpu())
+    joint_energy = float(accum["event_completed_joint_energy"][env_id].detach().cpu())
+    if pre_count <= 0.0 or post_count <= 0.0 or joint_energy <= 0.0:
+        return float("nan")
+
+    pre_contact = float(accum["event_completed_pre_contact_sum"][env_id].detach().cpu()) / pre_count
+    pre_posture = float(accum["event_completed_pre_posture_sum"][env_id].detach().cpu()) / pre_count
+    post_contact = float(accum["event_completed_post_contact_sum"][env_id].detach().cpu()) / post_count
+    post_posture = float(accum["event_completed_post_posture_sum"][env_id].detach().cpu()) / post_count
+    return ((pre_contact - post_contact) + (pre_posture - post_posture)) / joint_energy
+
+
 def scalar(value: torch.Tensor, env_id: int) -> float:
     output = float(value[env_id].detach().cpu())
     return output if math.isfinite(output) else float("nan")
@@ -698,12 +896,20 @@ def finalize_row(
     if math.isinf(joint_margin):
         joint_margin = float("nan")
 
-    comp_energy = scalar(accum["comp_energy_total"], env_id)
     comp_phase_alignment = safe_ratio(accum["comp_energy_valid_window"], accum["comp_energy_total"], env_id)
-    compensation_efficiency = (
-        float("nan")
-        if math.isnan(comp_energy) or comp_energy <= 0.0
-        else scalar(accum["risk_reduction_sum"], env_id) / comp_energy
+    missed_delayed_support_ratio = safe_ratio_with_observation(
+        accum["missed_support_count"],
+        accum["expected_support_count"],
+        accum["support_force_observed_count"],
+        env_id,
+        empty_value=0.0,
+    )
+    contact_window_iou = safe_ratio_with_observation(
+        accum["contact_iou_intersection"],
+        accum["contact_iou_union"],
+        accum["contact_iou_observed_count"],
+        env_id,
+        empty_value=1.0,
     )
 
     return {
@@ -719,10 +925,12 @@ def finalize_row(
             accum["touchdown_timing_error_sum"], accum["touchdown_timing_error_count"], env_id
         ),
         "foot_slip_ratio": safe_ratio(accum["slip_count"], accum["contact_count"], env_id),
+        "missed_delayed_support_ratio": missed_delayed_support_ratio,
         "stance_duration_deviation_mean": safe_mean(
             accum["stance_duration_deviation_sum"], accum["stance_duration_deviation_count"], env_id
         ),
         "unexpected_contact_count": scalar(accum["unexpected_contact_count"], env_id),
+        "contact_window_iou": contact_window_iou,
         "roll_rms": safe_rms(accum["roll_sq_sum"], accum["posture_count"], env_id),
         "pitch_rms": safe_rms(accum["pitch_sq_sum"], accum["posture_count"], env_id),
         "base_ang_vel_rms": safe_rms(accum["base_ang_vel_sq_sum"], accum["posture_count"], env_id),
@@ -738,7 +946,7 @@ def finalize_row(
         "joint_limit_margin_min": joint_margin,
         "action_jerk": safe_mean(accum["action_jerk_sum"], accum["action_jerk_count"], env_id),
         "compensation_phase_alignment": comp_phase_alignment,
-        "compensation_efficiency": compensation_efficiency,
+        "compensation_efficiency": event_compensation_efficiency(accum, env_id),
     }
 
 
@@ -809,7 +1017,7 @@ def main() -> None:
         initial_state = collect_state(unwrapped_env, actions, eval_ids)
         torque_limit = get_torque_limit(unwrapped_env.scene["robot"])
         joint_pos_limits = get_joint_pos_limits(unwrapped_env.scene["robot"])
-        accum = init_accumulators(num_envs, device, initial_state["root_pos"], actions)
+        accum = init_accumulators(num_envs, device, initial_state["root_pos"], actions, dt)
 
         write_header_if_needed(args_cli.output)
         episodes_written = 0

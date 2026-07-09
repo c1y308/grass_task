@@ -2,7 +2,7 @@ experiment_name: g1_grass_risk_curriculum
 seeds: [1, 2, 3]
 # null keeps the repository task default max_iterations.
 # Override at launch time with train_matrix.py --train-steps.
-train_steps: null
+train_steps: 10000
 methods:
   - name: B0_flat_rigid
     task: Unitree-G1-29dof-Grass-FlatRigid

@@ -63,6 +63,10 @@ simulation_app = app_launcher.app
 
 """Check for minimum supported RSL-RL version."""
 
+from isaaclab_platform_compat import patch_conda_forge_sys_version_for_isaaclab
+
+patch_conda_forge_sys_version_for_isaaclab()
+
 import importlib.metadata as metadata
 import platform
 
