@@ -64,8 +64,8 @@ class GrassTerrainSchedule:
             lambda_level=0.00,
             height_range=(0.0, 0.0),
             friction_range=(0.9, 1.1),
-            stiffness_range=(1.0, 1.0),
-            damping_range=(1.0, 1.0),
+            stiffness_range=(0.0, 0.0),
+            damping_range=(0.0, 0.0),
             transition_probability=0.0,
         )
     )

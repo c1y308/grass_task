@@ -6,7 +6,7 @@ Run all commands from the repository root inside the Isaac Lab environment:
 
 ```bash
 conda activate env_isaaclab
-cd /root/unitree_rl_lab
+cd ~/grass_task
 ```
 
 ## 1. Locate Checkpoints

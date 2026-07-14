@@ -141,28 +141,64 @@ def main():
     runner.load(resume_path)
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    os.makedirs(export_model_dir, exist_ok=True)
 
     if hasattr(runner, "export_policy_to_jit"):
         runner.export_policy_to_jit(export_model_dir, filename="policy.pt")
     else:
-        print("[WARNING]: runner.export_policy_to_jit is not available; skip JIT export.")
+        policy_nn = runner.get_inference_policy(device=env.unwrapped.device)
+        export_policy_as_jit(
+            policy_nn,
+            getattr(runner, "obs_normalizer", None),
+            path=export_model_dir,
+            filename="policy.pt",
+        )
 
     if hasattr(runner, "export_policy_to_onnx"):
         runner.export_policy_to_onnx(export_model_dir, filename="policy.onnx")
     else:
-        print("[WARNING]: runner.export_policy_to_onnx is not available; skip ONNX export.")
+        policy_nn = runner.get_inference_policy(device=env.unwrapped.device)
+        export_policy_as_onnx(
+            policy_nn,
+            normalizer=getattr(runner, "obs_normalizer", None),
+            path=export_model_dir,
+            filename="policy.onnx",
+        )
 
     print(f"[INFO]: Exported policy to: {export_model_dir}")
 
     policy = runner.get_inference_policy(device=env.unwrapped.device)
-    dt = getattr(env.unwrapped, "step_dt", None)
-    if dt is None:
-        dt = env_cfg.sim.dt * env_cfg.decimation
-
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
+    try:
+        # version 2.3 onwards
+    # export policy to onnx/jit
+    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+
+    if hasattr(runner, "export_policy_to_jit"):
+        runner.export_policy_to_jit(export_model_dir, filename="policy.pt")
+    else:
+        policy_nn = runner.get_inference_policy(device=env.unwrapped.device)
+        export_policy_as_jit(
+            policy_nn,
+            getattr(runner, "obs_normalizer", None),
+            path=export_model_dir,
+            filename="policy.pt",
+        )
+
+    if hasattr(runner, "export_policy_to_onnx"):
+        runner.export_policy_to_onnx(export_model_dir, filename="policy.onnx")
+    else:
+        policy_nn = runner.get_inference_policy(device=env.unwrapped.device)
+        export_policy_as_onnx(
+            policy_nn,
+            normalizer=getattr(runner, "obs_normalizer", None),
+            path=export_model_dir,
+            filename="policy.onnx",
+        )
+
+    print(f"[INFO]: Exported policy to: {export_model_dir}")
+
     # reset environment
     obs = env.get_observations()
     if version("rsl-rl-lib").startswith("2.3."):

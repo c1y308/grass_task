@@ -43,6 +43,7 @@ CSV_COLUMNS = (
     "scenario",
     "episode",
     "success",
+    "fall_count",
     "distance_m",
     "mean_tracking_error",
     "touchdown_timing_error_mean",
@@ -50,6 +51,7 @@ CSV_COLUMNS = (
     "missed_delayed_support_ratio",
     "stance_duration_deviation_mean",
     "unexpected_contact_count",
+    "unexpected_contact_ratio",
     "contact_window_iou",
     "roll_rms",
     "pitch_rms",
@@ -516,6 +518,7 @@ def init_accumulators(
         "expected_support_count": zeros(num_envs, device),
         "support_force_observed_count": zeros(num_envs, device),
         "unexpected_contact_count": zeros(num_envs, device),
+        "unexpected_contact_denominator": zeros(num_envs, device),
         "contact_iou_intersection": zeros(num_envs, device),
         "contact_iou_union": zeros(num_envs, device),
         "contact_iou_observed_count": zeros(num_envs, device),
@@ -701,6 +704,9 @@ def update_accumulators(
         unexpected_contact = contact_mask & ~expected_contact
         unexpected_contact_count_step = unexpected_contact.float().sum(dim=-1)
         accum["unexpected_contact_count"] += unexpected_contact_count_step
+        # Denominator for E_unexpected: number of steps outside expected contact window
+        swing_step_count = (~expected_contact).float().sum(dim=-1)
+        accum["unexpected_contact_denominator"] += swing_step_count
 
         force_observed = torch.isfinite(contact_force_z)
         support_force_observed = force_observed.any(dim=-1)
@@ -735,9 +741,14 @@ def update_accumulators(
             missed_support_count_step / expected_support_count_step.clamp_min(1.0),
             zeros(num_envs, device),
         )
-        contact_risk_step = (
-            touchdown_risk_step + slip_ratio_step + unexpected_contact_count_step + missed_support_ratio_step
+        unexpected_contact_ratio_step = torch.where(
+            swing_step_count > 0.0,
+            unexpected_contact_count_step / swing_step_count.clamp_min(1.0),
+            zeros(num_envs, device),
         )
+        contact_risk_step = (
+            touchdown_risk_step + slip_ratio_step + unexpected_contact_ratio_step + missed_support_ratio_step
+        ) / 4.0
         event_count_step = (
             slip_mask.any(dim=-1).float()
             + unexpected_contact.any(dim=-1).float()
@@ -919,6 +930,7 @@ def finalize_row(
         "scenario": args_cli.scenario,
         "episode": episode_number,
         "success": int(success),
+        "fall_count": int(not success),
         "distance_m": scalar(accum["distance_m"], env_id),
         "mean_tracking_error": safe_mean(accum["tracking_error_sum"], accum["tracking_count"], env_id),
         "touchdown_timing_error_mean": safe_mean(
@@ -930,6 +942,9 @@ def finalize_row(
             accum["stance_duration_deviation_sum"], accum["stance_duration_deviation_count"], env_id
         ),
         "unexpected_contact_count": scalar(accum["unexpected_contact_count"], env_id),
+        "unexpected_contact_ratio": safe_ratio(
+            accum["unexpected_contact_count"], accum["unexpected_contact_denominator"], env_id
+        ),
         "contact_window_iou": contact_window_iou,
         "roll_rms": safe_rms(accum["roll_sq_sum"], accum["posture_count"], env_id),
         "pitch_rms": safe_rms(accum["pitch_sq_sum"], accum["posture_count"], env_id),

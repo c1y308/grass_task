@@ -156,10 +156,6 @@ def main():
     print(f"[INFO]: Exported policy to: {export_model_dir}")
 
     policy = runner.get_inference_policy(device=env.unwrapped.device)
-    dt = getattr(env.unwrapped, "step_dt", None)
-    if dt is None:
-        dt = env_cfg.sim.dt * env_cfg.decimation
-
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.

@@ -173,7 +173,7 @@ Relevant output:
 [INFO][AppLauncher]: Using device: cpu
 [INFO]: Parsing configuration from: unitree_rl_lab.tasks.locomotion.research.g1_grass.g1_grass_env_cfg:G1GrassRiskGateEnvCfg
 [INFO]: Parsing configuration from: unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:BasePPORunnerCfg
-[INFO] Logging experiment in directory: /root/unitree_rl_lab/logs/rsl_rl/unitree_g1_29dof_grass_riskgate
+[INFO] Logging experiment in directory: /home/kemove/grass_task/logs/rsl_rl/unitree_g1_29dof_grass_riskgate
 [INFO]: Base environment:
         Environment device    : cpu
         Environment seed      : 1
